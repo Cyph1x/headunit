@@ -71,7 +71,8 @@ public:
     };
 private:
     std::map<std::string, int> streamToSessionIds;
-    std::string aaStreamName = "MLENT";
+    std::string aaStreamName = "AAMedia";
+    std::string aaTransientStreamName = "AAVR";
     int aaSessionID = -1;
     int aaTransientSessionID = -1;
     int previousSessionID = -1;
