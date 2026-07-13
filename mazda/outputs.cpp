@@ -240,7 +240,7 @@ void VideoOutput::input_thread_func()
                     bool hasMediaAudioFocus = audioFocus == AudioManagerClient::FocusType::PERMANENT;
                     bool hasAudioFocus = audioFocus != AudioManagerClient::FocusType::NONE;
 
-                    //printf("Key code %i value %i\n", (int)event.code, (int)event.value);
+                    printf("Key code %i value %i\n", (int)event.code, (int)event.value);
                     switch (event.code)
                     {
                     case KEY_G:
@@ -511,6 +511,11 @@ VideoOutput::VideoOutput(MazdaEventCallbacks* callbacks)
 VideoOutput::~VideoOutput()
 {
     gst_element_set_state((GstElement*)vid_pipeline, GST_STATE_NULL);
+    //mfw_isink releases its IPU surface asynchronously - block until the NULL
+    //transition actually completes, otherwise the surface can leak across
+    //repeated video focus cycles until the IPU device runs out ("createVideoSurface:
+    //max surfaces on device support on device1 exceeded!")
+    gst_element_get_state((GstElement*)vid_pipeline, nullptr, nullptr, GST_CLOCK_TIME_NONE);
 
     //data we write doesn't matter, wake up touch polling thread
     write(input_thread_quit_pipe_write, &input_thread_quit_pipe_write, sizeof(input_thread_quit_pipe_write));
