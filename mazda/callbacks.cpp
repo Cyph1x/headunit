@@ -213,11 +213,11 @@ static void setMixerVolume(const char* controlName, int cardIdx, long volume) {
 
 static void unmuteSoftvolControls() {
     // aautoMuxAAutoIn: softvol with resolution 100, set to max (99 = 0dB)
-    setMixerVolume("aautoMuxAAutoIn", 0, 99);
+    // setMixerVolume("aautoMuxAAutoIn", 0, 99);
     // aautoMuxAAutoVRIn: softvol with resolution 100, set to max (99 = 0dB)
-    setMixerVolume("aautoMuxAAutoVRIn", 0, 99);
+    // setMixerVolume("aautoMuxAAutoVRIn", 0, 99);
     // driversideMute: softvol with resolution 100, set to max (99 = 0dB)
-    setMixerVolume("driversideMute", 0, 99);
+    // setMixerVolume("driversideMute", 0, 99);
 }
 
 void MazdaEventCallbacks::AudioFocusHappend(AudioManagerClient::FocusType type) {
