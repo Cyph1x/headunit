@@ -70,18 +70,84 @@ struct TouchScreenState {
     int action_recvd;
 };
 
-static void aa_touch_event(HU::TouchInfo::TOUCH_ACTION action, unsigned int x, unsigned int y, uint64_t ts) {
+static const int MAX_TOUCH_SLOTS = 10;
 
-    g_hu->hu_queue_command([action, x, y, ts](IHUConnectionThreadInterface& s)
+struct TouchSlot {
+    int trackingId = -1;
+    int x = 0;
+    int y = 0;
+};
+
+struct TouchLocation {
+    uint32_t pointer_id;
+    uint32_t x;
+    uint32_t y;
+};
+
+// Fixed-capacity, trivially-copyable stand-in for a vector<TouchLocation> so
+// it can be captured by value into the hu_queue_command lambda with no heap
+// allocation.
+struct TouchLocationSet {
+    TouchLocation locations[MAX_TOUCH_SLOTS];
+    int count = 0;
+};
+
+static TouchLocationSet single_touch_location(uint32_t x, uint32_t y) {
+    TouchLocationSet set;
+    set.locations[0] = {0, x, y};
+    set.count = 1;
+    return set;
+}
+
+// Builds the current location list from the slots marked active in
+// `established`. If subjectSlot is a valid slot not yet marked established
+// (a fresh press) or a slot about to be un-established (a release, still
+// marked established by the caller), it is included as well and its
+// position within the resulting list is written to *actionIndexOut.
+static TouchLocationSet build_touch_locations(const TouchSlot* touchSlots, const bool* established, int subjectSlot, int* actionIndexOut) {
+    TouchLocationSet set;
+    for (int s = 0; s < MAX_TOUCH_SLOTS; s++) {
+        if (!established[s] && s != subjectSlot)
+            continue;
+        if (s == subjectSlot && actionIndexOut)
+            *actionIndexOut = set.count;
+        set.locations[set.count] = {(uint32_t)s, (uint32_t)touchSlots[s].x, (uint32_t)touchSlots[s].y};
+        set.count++;
+    }
+    return set;
+}
+
+static const char* touch_action_name(HU::TouchInfo::TOUCH_ACTION action) {
+    switch (action) {
+        case HU::TouchInfo::TOUCH_ACTION_PRESS: return "PRESS";
+        case HU::TouchInfo::TOUCH_ACTION_RELEASE: return "RELEASE";
+        case HU::TouchInfo::TOUCH_ACTION_DRAG: return "DRAG";
+        default: return "UNKNOWN";
+    }
+}
+
+static void aa_touch_event(HU::TouchInfo::TOUCH_ACTION action, const TouchLocationSet& locSet, int actionIndex, uint64_t ts) {
+
+    printf("aa_touch_event(): action=%s actionIndex=%d numLocations=%d\n", touch_action_name(action), actionIndex, locSet.count);
+    for (int i = 0; i < locSet.count; i++) {
+        printf("  location pointer_id=%u x=%u y=%u\n", locSet.locations[i].pointer_id, locSet.locations[i].x, locSet.locations[i].y);
+    }
+
+    g_hu->hu_queue_command([action, locSet, actionIndex, ts](IHUConnectionThreadInterface& s)
     {
         HU::InputEvent inputEvent;
         inputEvent.set_timestamp(ts);
         HU::TouchInfo* touchEvent = inputEvent.mutable_touch();
         touchEvent->set_action(action);
-        HU::TouchInfo::Location* touchLocation = touchEvent->add_location();
-        touchLocation->set_x(x);
-        touchLocation->set_y(y);
-        touchLocation->set_pointer_id(0);
+        if (actionIndex >= 0) {
+            touchEvent->set_action_index(actionIndex);
+        }
+        for (int i = 0; i < locSet.count; i++) {
+            HU::TouchInfo::Location* touchLocation = touchEvent->add_location();
+            touchLocation->set_x(locSet.locations[i].x);
+            touchLocation->set_y(locSet.locations[i].y);
+            touchLocation->set_pointer_id(locSet.locations[i].pointer_id);
+        }
 
         /* Send touch event */
 
@@ -128,6 +194,14 @@ void VideoOutput::pass_key_to_mzd(int type, int code, int val)
 void VideoOutput::input_thread_func()
 {
     TouchScreenState mTouch {0,0,(HU::TouchInfo::TOUCH_ACTION)0,0};
+    TouchSlot touchSlots[MAX_TOUCH_SLOTS];
+    bool established[MAX_TOUCH_SLOTS] = {};
+    int currentSlot = 0;
+    bool usingMultitouchProtocol = false;
+    int pendingPressSlots[MAX_TOUCH_SLOTS];
+    int numPendingPress = 0;
+    int pendingReleaseSlots[MAX_TOUCH_SLOTS];
+    int numPendingRelease = 0;
     int maxfdPlus1 = std::max(std::max(touch_fd, kbd_fd), input_thread_quit_pipe_read) + 1;
     while (true)
     {
@@ -172,23 +246,57 @@ void VideoOutput::input_thread_func()
             for (int i=0;i < num_chars;i++)
             {
                 auto& event = events[i];
+                printf("touch_fd raw event: type=0x%02x code=0x%03x value=%d\n", event.type, event.code, event.value);
                 switch (event.type)
                 {
                     case EV_ABS:
                         switch (event.code) {
+                            case ABS_MT_SLOT:
+                                // if (!usingMultitouchProtocol)
+                                    // printf("touch: detected ABS_MT_SLOT, switching to multitouch protocol\n");
+                                usingMultitouchProtocol = true;
+                                currentSlot = event.value;
+                                if (currentSlot < 0)
+                                    currentSlot = 0;
+                                else if (currentSlot >= MAX_TOUCH_SLOTS)
+                                    currentSlot = MAX_TOUCH_SLOTS - 1;
+                                // printf("touch: ABS_MT_SLOT -> currentSlot=%d\n", currentSlot);
+                                break;
+                            case ABS_MT_TRACKING_ID:
+                                // if (!usingMultitouchProtocol)
+                                    // printf("touch: detected ABS_MT_TRACKING_ID, switching to multitouch protocol\n");
+                                usingMultitouchProtocol = true;
+                                if (event.value < 0) {
+                                    // printf("touch: slot %d tracking id lost (release), had id=%d\n", currentSlot, touchSlots[currentSlot].trackingId);
+                                    if (established[currentSlot] && numPendingRelease < MAX_TOUCH_SLOTS)
+                                        pendingReleaseSlots[numPendingRelease++] = currentSlot;
+                                    touchSlots[currentSlot].trackingId = -1;
+                                } else {
+                                    // printf("touch: slot %d tracking id assigned (press), id=%d\n", currentSlot, event.value);
+                                    touchSlots[currentSlot].trackingId = event.value;
+                                    if (numPendingPress < MAX_TOUCH_SLOTS)
+                                        pendingPressSlots[numPendingPress++] = currentSlot;
+                                }
+                                break;
                             case ABS_MT_POSITION_X:
-                                mTouch.x = event.value * 800 /4095;
+                                touchSlots[currentSlot].x = event.value * 800 /4095;
+                                mTouch.x = touchSlots[currentSlot].x;
                                 break;
                             case ABS_MT_POSITION_Y:
                                 #if ASPECT_RATIO_FIX
-                                mTouch.y = event.value * 450/4095 + 15;
+                                touchSlots[currentSlot].y = event.value * 450/4095 + 15;
                                 #else
-                                mTouch.y = event.value * 480/4095;
+                                touchSlots[currentSlot].y = event.value * 480/4095;
                                 #endif
+                                mTouch.y = touchSlots[currentSlot].y;
+                                break;
+                            default:
+                                // printf("touch: unhandled EV_ABS code=0x%03x value=%d\n", event.code, event.value);
                                 break;
                         }
                         break;
                     case EV_KEY:
+                        // printf("touch: EV_KEY code=0x%03x (BTN_TOUCH=0x%03x) value=%d\n", event.code, BTN_TOUCH, event.value);
                         if (event.code == BTN_TOUCH) {
                             mTouch.action_recvd = 1;
                             if (event.value == 1) {
@@ -200,11 +308,51 @@ void VideoOutput::input_thread_func()
                         }
                         break;
                     case EV_SYN:
-                        if (mTouch.action_recvd == 0) {
+                        if (event.code != SYN_REPORT) {
+                            // printf("touch: EV_SYN code=0x%03x (not SYN_REPORT), ignoring\n", event.code);
+                            break;
+                        }
+
+                        // printf("touch: SYN_REPORT usingMultitouchProtocol=%d numPendingPress=%d numPendingRelease=%d\n",
+                        //       usingMultitouchProtocol ? 1 : 0, numPendingPress, numPendingRelease);
+
+                        if (usingMultitouchProtocol) {
+                            uint64_t ts = get_timestamp(event);
+                            bool hadPressOrRelease = numPendingPress > 0 || numPendingRelease > 0;
+
+                            // "established" tracks which slots we have already announced to the
+                            // phone as active pointers, so simultaneous presses/releases in one
+                            // SYN_REPORT still get staged one at a time (each message only ever
+                            // references pointers already introduced, or the one it's introducing).
+                            for (int i = 0; i < numPendingRelease; i++) {
+                                int slot = pendingReleaseSlots[i];
+                                int actionIndex = -1;
+                                TouchLocationSet locations = build_touch_locations(touchSlots, established, slot, &actionIndex);
+                                aa_touch_event(HU::TouchInfo::TOUCH_ACTION_RELEASE, locations, actionIndex, ts);
+                                established[slot] = false;
+                            }
+                            numPendingRelease = 0;
+
+                            for (int i = 0; i < numPendingPress; i++) {
+                                int slot = pendingPressSlots[i];
+                                int actionIndex = -1;
+                                TouchLocationSet locations = build_touch_locations(touchSlots, established, slot, &actionIndex);
+                                aa_touch_event(HU::TouchInfo::TOUCH_ACTION_PRESS, locations, actionIndex, ts);
+                                established[slot] = true;
+                            }
+                            numPendingPress = 0;
+
+                            if (!hadPressOrRelease) {
+                                TouchLocationSet locations = build_touch_locations(touchSlots, established, -1, nullptr);
+                                if (locations.count > 0) {
+                                    aa_touch_event(HU::TouchInfo::TOUCH_ACTION_DRAG, locations, -1, ts);
+                                }
+                            }
+                        } else if (mTouch.action_recvd == 0) {
                             mTouch.action = HU::TouchInfo::TOUCH_ACTION_DRAG;
-                            aa_touch_event(mTouch.action, mTouch.x, mTouch.y, get_timestamp(event));
+                            aa_touch_event(mTouch.action, single_touch_location((uint32_t)mTouch.x, (uint32_t)mTouch.y), -1, get_timestamp(event));
                         } else {
-                            aa_touch_event(mTouch.action, mTouch.x, mTouch.y, get_timestamp(event));
+                            aa_touch_event(mTouch.action, single_touch_location((uint32_t)mTouch.x, (uint32_t)mTouch.y), -1, get_timestamp(event));
                             mTouch.action_recvd = 0;
                         }
                         break;
