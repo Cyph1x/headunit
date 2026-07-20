@@ -22,6 +22,10 @@ class DesktopEventCallbacks : public IHUConnectionThreadEventCallbacks {
         std::unique_ptr<AudioOutput> audioOutput;
 
         MicInput micInput;
+
+        std::string naviTurnDescription;
+        int32_t naviDistanceMeters = -1;
+        void UpdateNaviDisplay();
 public:
         DesktopEventCallbacks();
         ~DesktopEventCallbacks();

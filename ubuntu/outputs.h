@@ -2,6 +2,7 @@
 
 #include <glib.h>
 #include <stdio.h>
+#include <string>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
@@ -28,6 +29,7 @@ struct gst_app_t;
 class VideoOutput {
     GstElement *vid_pipeline = nullptr;
     GstAppSrc *vid_src = nullptr;
+    GstElement *nav_overlay = nullptr;
     GSource* timeout_src = nullptr;
     SDL_Window* window = nullptr;
     bool nightmode = false;
@@ -44,4 +46,5 @@ public:
 
     void MediaPacket(uint64_t timestamp, const byte * buf, int len);
     void SendNightMode();
+    void SetNaviText(const std::string &text);
 };

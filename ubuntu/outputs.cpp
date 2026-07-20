@@ -286,13 +286,15 @@ VideoOutput::VideoOutput(DesktopEventCallbacks* callbacks) : callbacks(callbacks
     const char* vid_launch_str = "appsrc name=mysrc is-live=true block=false max-latency=100000 do-timestamp=true stream-type=stream typefind=true ! "
                                  "queue ! "
                                  "h264parse ! "
-                                 "avdec_h264 ! "
+                                 "vah264dec ! "
         #if ASPECT_RATIO_FIX
                                  "videocrop top=16 bottom=15 ! "
         #endif
                                  "videoscale name=myconvert ! "
                                  "videoconvert ! "
-                                 "ximagesink name=mysink";
+                                 "textoverlay name=navoverlay text=\"\" silent=true valignment=top halignment=center "
+                                 "shaded-background=true font-desc=\"Sans Bold 20\" ! "
+                                 "glimagesink name=mysink";
     vid_pipeline = gst_parse_launch(vid_launch_str, &error);
 
     bus = gst_pipeline_get_bus(GST_PIPELINE(vid_pipeline));
@@ -300,6 +302,7 @@ VideoOutput::VideoOutput(DesktopEventCallbacks* callbacks) : callbacks(callbacks
     gst_object_unref(bus);
 
     vid_src = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(vid_pipeline), "mysrc"));
+    nav_overlay = gst_bin_get_by_name(GST_BIN(vid_pipeline), "navoverlay");
 
     gst_app_src_set_stream_type(vid_src, GST_APP_STREAM_TYPE_STREAM);
 
@@ -343,9 +346,13 @@ VideoOutput::~VideoOutput()
 
     gst_object_unref(vid_pipeline);
     gst_object_unref(vid_src);
+    if (nav_overlay) {
+        gst_object_unref(nav_overlay);
+    }
 
     vid_pipeline = nullptr;
     vid_src = nullptr;
+    nav_overlay = nullptr;
     g_source_destroy(timeout_src);
     g_source_unref(timeout_src);
     timeout_src = nullptr;
@@ -374,4 +381,11 @@ void VideoOutput::SendNightMode()
     });
 
     printf("Nightmode: %s\n", nm ? "On" : "Off");
+}
+
+void VideoOutput::SetNaviText(const std::string &text) {
+    if (!nav_overlay) {
+        return;
+    }
+    g_object_set(nav_overlay, "text", text.c_str(), "silent", text.empty(), NULL);
 }

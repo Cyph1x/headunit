@@ -203,16 +203,97 @@ std::string DesktopCommandServerCallbacks::ChangeParameterConfig(std::string par
     return "Config wasn't updated. Wrong parameters.";
 }
 
+static std::string DescribeTurn(const HU::NAVTurnMessage &request) {
+    const char *side = "";
+    if (request.turn_side() == HU::NAVTurnMessage_TURN_SIDE_TURN_LEFT) {
+        side = "Left";
+    } else if (request.turn_side() == HU::NAVTurnMessage_TURN_SIDE_TURN_RIGHT) {
+        side = "Right";
+    }
+
+    switch (request.turn_event()) {
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_DEPART:
+            return "Depart";
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_NAME_CHANGE:
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_STRAIGHT:
+            return "Continue Straight";
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_SLIGHT_TURN:
+            return std::string("Slight ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_TURN:
+            return std::string("Turn ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_SHARP_TURN:
+            return std::string("Sharp ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_U_TURN:
+            return std::string("U-Turn ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_ON_RAMP:
+            return std::string("Ramp ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_OFF_RAMP:
+            return std::string("Exit ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_FORK:
+            return std::string("Keep ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_MERGE:
+            return std::string("Merge ") + side;
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_ROUNDABOUT_ENTER:
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_ROUNDABOUT_EXIT:
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_ROUNDABOUT_ENTER_AND_EXIT:
+            return "Roundabout";
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_FERRY_BOAT:
+            return "Take Ferry";
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_FERRY_TRAIN:
+            return "Take Train";
+        case HU::NAVTurnMessage_TURN_EVENT_TURN_DESTINATION:
+            return "Arrive at Destination";
+        default:
+            return "";
+    }
+}
+
+static std::string FormatNaviDistance(int32_t meters) {
+    if (meters < 0) {
+        return "";
+    }
+    char buf[32];
+    if (meters >= 1000) {
+        snprintf(buf, sizeof(buf), "%.1f km", meters / 1000.0);
+    } else {
+        snprintf(buf, sizeof(buf), "%d m", meters);
+    }
+    return buf;
+}
+
+void DesktopEventCallbacks::UpdateNaviDisplay() {
+    std::string text = naviTurnDescription;
+    if (!text.empty()) {
+        std::string distance = FormatNaviDistance(naviDistanceMeters);
+        if (!distance.empty()) {
+            text += "\n" + distance;
+        }
+    }
+
+    run_on_main_thread([this, text](){
+        if (videoOutput) {
+            videoOutput->SetNaviText(text);
+        }
+        return false;
+    });
+}
+
 void DesktopEventCallbacks::HandleNaviStatus(IHUConnectionThreadInterface& stream, const HU::NAVMessagesStatus &request){
+    if (request.status() == HU::NAVMessagesStatus_STATUS_STOP) {
+        naviTurnDescription.clear();
+        naviDistanceMeters = -1;
+        UpdateNaviDisplay();
+    }
 }
 
 void DesktopEventCallbacks::HandleNaviTurn(IHUConnectionThreadInterface& stream, const HU::NAVTurnMessage &request){
-    const char *event_name = &request.event_name()[0];
-    std::string image = request.image();
-    puts(event_name);
-    logv ("AA_CH_NAVI: %s, TurnSide: %d, TurnEvent:%d, TurnNumber: %d, TurnAngle: %d", event_name, request.turn_side(), request.turn_event(), request.turn_number(), request.turn_angle());
-    hex_dump("AA_CH_NAVI", 256, (unsigned char*)image.c_str(), image.length());
+    logv ("AA_CH_NAVI: %s, TurnSide: %d, TurnEvent:%d, TurnNumber: %d, TurnAngle: %d", request.event_name().c_str(), request.turn_side(), request.turn_event(), request.turn_number(), request.turn_angle());
+    naviTurnDescription = DescribeTurn(request);
+    UpdateNaviDisplay();
 }
+
 void DesktopEventCallbacks::HandleNaviTurnDistance(IHUConnectionThreadInterface& stream, const HU::NAVDistanceMessage &request){
+    naviDistanceMeters = request.distance();
     logv ("AA_CH_NAVI: Distance: %d", request.distance());
+    UpdateNaviDisplay();
 }
